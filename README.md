@@ -4,7 +4,7 @@ Integrate Beeline routing and navigation into your Android app
 
 ## Requirements
 
-- Supports **Android 19 (4.4 KitKat)** and above
+- Supports **Android 21 (5.0 Lollipop)** and above
 - Supports **armeabi-v7a**, **arm64-v8a**, **x86**, **x86_64**
 
 - Written in **Kotlin** and **C++**
@@ -45,10 +45,11 @@ In your module level `build.gradle` file:
 
 ```gradle
 dependencies {
-  implementation 'co.beeline:beeline-sdk:1.0.0'
+  implementation 'co.beeline:beeline-sdk:2.0.0'
 }
 ```
 
+## Integration
 
 ### Specify permissions
 
@@ -67,146 +68,287 @@ We leave it to you to ensure you request the appropriate location permissions fr
 See https://developer.android.com/training/permissions/requesting
 
 
-### Initialise Beeline SDK
+## Routing
 
-Before using any Beeline SDK components you must initialise the Beeline SDK.
+### Request routes
 
-We suggest placing this call in your `Application.onCreate()`.
+The Beeline routing API will return up to three routes. Each route is categorised as follows:
+- **Fast**
 
-```kotlin
-BeelineSDK.initialise()
-```
+ *Prioritises the shortest, simplest route. May contain fast traffic and tricky junctions.*
+- **Balanced**
 
-### Create a Beeline module
+ *Fairly direct, using well-rated roads and paths where possible.*
+- **Quiet**
 
-For convenience we have included a `BeelineModule` class that creates an instance of each of the classes you'll need for routing and navigation.
+ *Keeps you on well-rated roads from the Beeline community. It may feel longer, but you'll ride great roads.*
 
-The `instance`, `key` and `group` parameters will be provided to you by Beeline.
+Please note that in some cases, especially for shorter routes, routes can be close to identical. In this case less than three will be returned. They will be prioritised in this order:
+- balanced
+- fast
+- quiet
 
-You can also specify the distance unit to use for formatting distances, the default value is `DistanceUnit.METRIC`.
+Examle from the Beeline app displaying three different route options
 
-```kotlin
-val beelineModule = BeelineModule(context, instance, key, group, distanceUnit = DistanceUnit.METRIC)
+<img src="images/routes-screenshot.jpeg" width="200">
 
-// RouteProvider for requesting a route from Beeline's routing API
-val routeProvider = beelineModule.routeProvider
+### Example request
 
-// Factory function for creating a NavigationController
-val navigationController = beelineModule.navigationController(route)
+Request bicycle routes between two coordinates.
 
-// Factory function for creating a NavigationViewModel
-val navigationViewModel = beelineModule.navigationViewModel(navigationController)
-```
-
-### Request a route
-
-Start by requesting a route from the Beeline routing API
+Note, the `instance` and `key` parameters will be provided to you by Beeline.
 
 ```kotlin
+val routeProvider: RouteProvider = BeelineRouting(instance, key)
+
 val parameters = RouteParameters(
   vehicle = Vehicle.Bicycle,
   start = Coordinate(51.50804, -0.12807),
   end = Coordinate(51.504500, -0.086500)
 )
 
-val disposable = beelineModule.routeProvider.route(parameters)
+val disposable = routeProvider.route(parameters)
     .subscribeOn(Schedulers.io())
     .observeOn(AndroidSchedulers.mainThread())
     .subscribe(
-        { routeResponse ->
-            startNavigation(routeResponse.route)
+        { routes ->
+            // Handle success
         },
         { error ->
-            Toast.makeText(this, error.localizedMessage, Toast.LENGTH_LONG).show()
+            // Handle error
         }
     )
 
 // Remember to handle your Rx disposables
+```
 
-private fun startNavigation(route: TrackRoute) {
+### Example response
+
+```Kotlin
+val route routes.first() // Up to 3 returned
+route.estimatedDistance // distance in meters
+route.estimatedDuration // duration in milliseconds
+route.meteData.category // Fast, Quiet, Balanced or Default
+val course = route.course // The underlying route used for navigation
+route.roadRatings.forEach { roadRating ->
+  roadRating.isPositive // If this is a postively or negatively rated road
+  roadRating.polyline // Decode to display on a map
+}
+```
+
+### Displaying a route on a map
+
+Each route provides a `polyline` of encoded coordinates. You can decode this polyline to display the route on a map. We currently do not provide specific tools for mapping providers.
+
+If you are new to polylines, this [tool](https://developers.google.com/maps/documentation/utilities/polylineutility) may be helpful.
+
+```kotlin
+val polyline = routes.first().polyline
+print(polyline) // "yqstHl_mJOU_@_Au@}B"
+```
+
+### Displaying Beeline Road Ratings
+
+Each route also contains road ratings describing sections of the route that Beeline Routing considers to be positive or negative.
+
+```kotlin
+route.roadRatings.forEach { roadRating ->
+  roadRating.isPositive // If this is a postively or negatively rated road
+  roadRating.polyline // Decode to display on a map
+}
+```
+
+### Passing routes between Android components
+
+Beeline model classes implement the `Parcelable` interface, allowing you to include them in an `Intent`.
+
+```kotlin
+  val route = routeResponse.route
+
   val intent = Intent(this, NavigationActivity::class.java).apply {
       putExtra(NavigationActivity.EXTRA_ROUTE, route)
   }
+
   startActivity(intent)
+
+  // ...
+
+  // Get the route from the intent
+  val route = intent.getParcelableExtra<TrackRoute>(EXTRA_ROUTE)!!
 }
 ```
 
-### Display route on a map
+## Navigation
 
-The route response contains a `polyline` that you can use to display the route on a map.
+Example of navigation screen from the Beeline app
 
-### Create a navigation Activity
+ <img src="images/nav-screenshot.jpeg" width="200">
 
-Create a new `Activity` and register it in your `AndroidManifest.xml` with the `theme` provided by Beeline.
+### Navigator
 
-```xml
-<!-- Under application tag -->
-<activity
-  android:name="x.y.z.NavigationActivity"
-  android:theme="@style/BeelineNavigationTheme" />
-```
+Navigation is handled by instances of `Navigator`. It handles all the route logic and by default will attempt to automatically reroute if the user deviates from the route.
 
-### Example navigation Activity implementation
+The `Navigator` produces a `RideSnapshot` for each location update (usually once a second).
+
+The snapshot provides information including:
+- bearing to next junction
+- anticipation bearing
+- distance to next junction
+- distance to destination
+- time to destination
+- next maneuver
+- if the user is on or off route
 
 ```kotlin
-class NavigationActivity : AppCompatActivity() {
+// Subscribe to navigation updates
+navigator.snapshotObservable
+  .subscribe { snapshot ->
 
-    companion object {
-        const val EXTRA_ROUTE = "route"
-    }
+  }
+```
 
-    private lateinit var viewHolder: NavigationViewHolder
-    private lateinit var navigationController: NavigationController
+### Maneuvers
 
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        setContentView(R.layout.navigation)
+Beeline currently provides the following maneuver indicators:
 
-        // inject or lookup as best suits your application
-        val beelineModule: BeelineModule
+![](images/maneuvers.png)
 
-        // get the route from the intent
-        val route = intent.getParcelableExtra<TrackRoute>(EXTRA_ROUTE)!!
+- Fork/turn left
+- Fork/turn right
+- Keep left
+- Keep right
+- Roundabout
 
-        // create a navigation controller for the route
-        navigationController = beelineModule.navigationController(route)
+### Navigation events
 
-        // create a view model for the navigation controller
-        val navigationViewModel = beelineModule.navigationViewModel(navigationController)
+The `Navigator` also produces `NavigationEvent`s when the following events occur:
+- Reroute started
+- Reroute succeeded
+- Reroute failed
 
-        // create a view holder to bind the view to the view model
-        viewHolder = NavigationViewHolder(findViewById(R.id.navigation), navigationViewModel)
+You can use these if you want to display notifications for example when the route is updated or the reroute failed.
 
-        // implement the stop button
-        viewHolder.stopButton.setOnClickListener {
-            navigationController.stop()
-            // show end of journey screen?
-        }
+```kotlin
+// Subscribe to navigation events
+navigator.events
+  .subscribe { event ->
 
-        // implement the map button
-        viewHolder.mapButton.setOnClickListener {
-            // hide navigation and show map?
-        }
+  }
+```
 
-        // start navigation
-        navigationController.start()
+### Creating a navigator
 
-        // Set the battery % and range
-        viewHolder.batteryValueTextView.text = NumberFormat.getPercentInstance().format(0.95)
-        viewHolder.rangeTextView.text = beelineModule.distanceFormatter.formatDistance(125_000.0).combined
-    }
+The `Navigator` needs various dependencies so we recommend you instantiate it via a `BeelineNavigatorFactory`.
 
-    override fun onStart() {
-        super.onStart()
-        viewHolder.onStart()
-    }
+In theory a `Navigator` does not have the same lifecycle as an `Activity` so you may want to hold a reference to your `Navigator` in a `Service`. For example if you wanted to allow your navigator to continue to run if the app is in the background.
 
-    override fun onStop() {
-        super.onStop()
-        viewHolder.onStop()
-    }
-}
+For a simple example you could inject an instance of `BeelineNavigatorFactory` into an Activity then create an instance from a route you passed via an `Intent`.
 
+```kotlin
+@Inject
+val navigatorFactory: BeelineNavigatorFactory
+
+...
+// Inject ...
+val route = intent.getParcelableExtra<TrackRoute>(EXTRA_ROUTE)!!
+val navigator = factory.navigator(route)
+```
+
+You can create your own factory implementation or use the one we provide based on your needs.
+
+For example
+```kotlin
+val routeProvider: RouteProvider = BeelineRouting(instance, key)
+val locationProvider = SimpleLocationProvider(context) // Or use your own
+
+val navigatorFactory: BeelineNavigatorFactory = DefaultBeelineNavigatorFactory(
+  routeProvider = routeProvider,
+  locationProvider = locationProvider
+)
+```
+
+### Displaying Beeline navigation
+
+The Beeline SDK uses the ViewModel pattern, building on Android JetPack's ViewModel library.
+Learn more [here](https://developer.android.com/topic/libraries/architecture/viewmodel).
+
+We also use Android JetPack ViewBinding.
+Learn more [here](https://developer.android.com/topic/libraries/view-binding).
+
+Every Android application architecture is different. As a result we do not provide an Activity or Fragment but instead provide components that allow you to integrate them into your app. We also make no assumptions about your architecture with regards to dependency injection and leave this to you to implement. Our ViewModels accept interfaces so you can provide alternatives to our default classes if you desire.
+
+We provide a `NavigationCompassViewHolder` class that binds your layout to a `NavigationViewModel`. This will update the arrow and other components each second.
+
+The main compass interface is `navigation.xml`
+This contains the compass arrow, progress indicator, distance to next maneuver, junction indicator, etc.
+
+For a complete layout example please look at `demo_navigation.xml`. However we suggest you make your own.
+
+### NavigationViewModel
+
+As the `NavigationViewModel` has various dependencies we recommend instantiating it via a `Factory` which you inject into your Activity or Fragment.
+
+```kotlin
+// In your Dependency injection componet
+val factory: BeelineViewModelFactory = DefaultBeelineViewModelFactory(
+  context: context, // Application Context
+  locationProvider: locationProvider, // created earlier
+  distanceFormatter: SimpleDistanceFormatter(context, DistanceUnit.METRIC), // or create your own
+  timeFormatter: SimpleTimeFormatter(context) // or create your own
+)
+
+// In your Activity, Fragement, etc
+
+@Inject
+val viewModelFactory: BeelineViewModelFactory
+```
+
+### Example integration
+```kotlin
+
+@Inject
+val viewModelFactory: BeelineViewModelFactory
+
+@Inject
+val navigatorFactory: BeelineNavigatorFactory
+
+...
+
+// ...inject your dependencies
+
+val binding = YourLayoutBinding.inflate(layoutInflater)
+// ... set your view
+
+// Get a reference to the `NavigationCompassBinding` generated by the `ViewBinding` library
+// The name will be equal to the id you assigned it in your .xml
+val beelineNavigationBinding: NavigationCompassBinding
+   = yourRootBinding.beelineNavigationCompass
+
+// get the route from the intent
+val route = intent.getParcelableExtra<TrackRoute>(EXTRA_ROUTE)!!
+
+// create a navigator for the route
+val navigator = navigatorFactory.navigator(route)
+
+// create a view model for the navigator
+val navigationViewModel = viewModelFactory.navigationViewModel(navigator)
+
+// Create a viewHolder to bind the ViewModel to the view
+val viewHolder = NavigationViewHolder(beelineNavigationBinding, navigationViewModel)
+
+// Start the navigator
+navigator.start()
+
+// Start the viewHolder
+viewHolder.start()
+
+...
+
+// Stop the viewHolder
+viewHolder.stop()
+
+// Stop the navigator
+navigator.stop()
 ```
 
 ### Running in the background
